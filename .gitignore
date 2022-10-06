@@ -1,0 +1,56 @@
+# Ansible
+*.retry
+
+# Direnv
+/.direnv
+
+# Nix
+result
+result-*
+
+# Rust
+**/*.rs.bk
+*.pdb
+debug/
+target/
+
+# JetBrains
+.idea/
+
+# Emacs
+*.elc
+*_flymake.*
+*~
+.\#*
+.dir-locals.el
+.projectile
+\#*\#
+auto-save-list
+flycheck_*.el
+tramp
+
+# Vim
+!*.svg
+*~
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]*.un~
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+
+# macOS quirks
+.AppleDB
+.AppleDesktop
+.AppleDouble
+.DS_Store
+.DocumentRevisions-V100
+.LSOverride
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+._*
+.apdisk
+.com.apple.timemachine.donotpresent
+.fseventsd
