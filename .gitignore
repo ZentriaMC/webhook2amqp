@@ -3,6 +3,7 @@
 
 # Direnv
 /.direnv
+.envrc.local
 
 # Nix
 result

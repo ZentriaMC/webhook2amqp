@@ -36,7 +36,9 @@
         devShell = pkgs.mkShell {
           buildInputs = [
             rust
-          ];
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin (with pkgs.darwin.apple_sdk.frameworks; [
+            Security
+          ]);
         };
       });
 }
