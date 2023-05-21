@@ -36,6 +36,8 @@
         devShell = pkgs.mkShell {
           buildInputs = [
             rust
+            pkgs.luajit
+            pkgs.luajitPackages.moonscript
           ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin (with pkgs.darwin.apple_sdk.frameworks; [
             Security
           ]);
