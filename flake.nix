@@ -13,7 +13,7 @@
   outputs = { self, nixpkgs, flake-utils, rust-overlay, ... }:
     let
       # https://rust-lang.github.io/rustup-components-history/
-      rustVersion = "1.64.0";
+      rustVersion = "1.69.0";
       supportedSystems = [
         "aarch64-darwin"
         "aarch64-linux"
