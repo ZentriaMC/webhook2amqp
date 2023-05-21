@@ -1,21 +1,26 @@
+#![allow(clippy::redundant_pattern_matching)]
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context};
-use bytes::Buf;
-use futures::{SinkExt, StreamExt};
-use hyper::body::HttpBody;
-use hyper::{Body, Method, Request, Response, StatusCode};
-use lapin::options::BasicPublishOptions;
 use lapin::BasicProperties;
-use mime::Mime;
+use lapin::{options::BasicPublishOptions, Connection};
+use mlua::Lua;
+use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::Mutex;
 use tracing::info;
 
-const MAX_BODY_SIZE: usize = 1 << 27; // 128 MiB
+mod lua;
+mod lua_config;
+mod request;
+mod svc;
+mod tokio_util;
 
-type Err = Box<dyn std::error::Error + Sync + Send>;
+type Error = Box<dyn std::error::Error + Send + Sync>;
 
-struct Payload {
+pub struct Payload {
+    request_id: String,
+    qname: String,
     mime_type: String,
     body: Vec<u8>,
 }
@@ -27,18 +32,30 @@ async fn ctrl_c() {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Err> {
+async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
 
     let amqp_addr = std::env::var("WEBHOOK2AMQP_AMQP_ADDR")
         .unwrap_or_else(|_| "amqp://127.0.0.1:5672/%2f".into());
 
-    let amqp_queue_name =
-        std::env::var("WEBHOOK2AMQP_AMQP_QUEUE_NAME").unwrap_or_else(|_| "webhook".into());
-
     let server_addr: SocketAddr = std::env::var("WEBHOOK2AMQP_LISTEN_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:3000".into())
         .parse()?;
+
+    let lua_sandbox = std::env::var("WEBHOOK2AMQP_LUA_SANDBOX").unwrap_or_else(|_| "./lua".into());
+
+    let config_file =
+        std::env::var("WEBHOOK2AMQP_LUA_KV_CONFIG").unwrap_or_else(|_| "./config.jsonc".into());
+
+    // Load configuration
+    let lua_config = lua_config::load_config(config_file).await?;
+
+    // Initialize Lua runtime
+    let lua = Arc::new(Mutex::new(Lua::new()));
+    let create_queue_names = {
+        let lua = lua.lock().await;
+        crate::lua::setup_engine(&lua, lua_sandbox, lua_config).await?
+    };
 
     let amqp_conn = Arc::new(
         lapin::Connection::connect(
@@ -50,135 +67,72 @@ async fn main() -> Result<(), Err> {
     info!("amqp connection established");
 
     // Create a channel for passing payload from HTTP server to AMQP
-    let (tx, rx) = futures::channel::mpsc::channel::<Payload>(1);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Payload>(1);
 
-    // Launch HTTP server
-    let server = tokio::task::spawn(async move {
-        let server =
-            hyper::Server::bind(&server_addr).serve(hyper::service::make_service_fn(|_conn| {
-                let tx = tx.clone();
-                async {
-                    Ok::<_, Err>(hyper::service::service_fn(move |req| {
-                        // TODO: log errors
-                        http_handler(req, tx.clone())
-                    }))
-                }
-            }));
+    let local = tokio::task::LocalSet::new();
 
-        server.with_graceful_shutdown(ctrl_c()).await?;
+    local.spawn_local(amqp_task(amqp_conn.clone(), create_queue_names, rx));
+    local.spawn_local(http_server_task(lua.clone(), server_addr, tx));
+    local.await;
 
-        Ok::<(), Err>(())
-    });
-
-    // Launch AMQP client
-    let amqp_conn2 = amqp_conn.clone(); // XXX
-    let amqp_client = tokio::task::spawn(async move {
-        let mut rx = rx;
-        let channel = amqp_conn2.create_channel().await?;
-
-        let queue = channel
-            .queue_declare(
-                &amqp_queue_name,
-                lapin::options::QueueDeclareOptions::default(),
-                lapin::types::FieldTable::default(),
-            )
-            .await?;
-
-        info!(?queue, "created queue {amqp_queue_name}");
-        let qname = queue.name().as_str();
-
-        while let Some(received) = rx.next().await {
-            let opts = BasicPublishOptions::default();
-            let props = BasicProperties::default().with_content_type(received.mime_type.into());
-
-            channel
-                .basic_publish("", qname, opts, &received.body, props)
-                .await?
-                .await?;
-
-            info!("message delivered");
-        }
-
-        channel.close(0, "").await?;
-
-        Ok::<(), Err>(())
-    });
-
-    futures::future::try_join_all(vec![server, amqp_client]).await?;
     amqp_conn.close(0, "").await?;
     info!("bye");
 
     Ok(())
 }
 
-async fn http_handler(
-    req: Request<Body>,
-    mut tx: futures::channel::mpsc::Sender<Payload>,
-) -> Result<Response<Body>, Err> {
-    let mut resp = Response::new(Body::empty());
+async fn amqp_task(
+    conn: Arc<Connection>,
+    queues: Vec<String>,
+    mut rx: Receiver<Payload>,
+) -> Result<(), Error> {
+    let channel = conn.create_channel().await?;
 
-    match (req.method(), req.uri().path()) {
-        (&Method::POST, "/handle") => {
-            // Grab mime type
-            let raw_mime = if let Some(hdr) = req.headers().get("content-type") {
-                hdr.to_str()
-                    .context("expected content-type header to be valid string")?
-            } else {
-                "application/octet-stream"
-            };
-            let mime: Mime = raw_mime.parse()?;
-
-            // Grab the body
-            let body = collect_body(req.into_body(), MAX_BODY_SIZE).await?;
-
-            tx.send(Payload {
-                mime_type: mime.to_string(),
-                body,
-            })
+    // Create queues
+    for ref qname in queues {
+        let queue = channel
+            .queue_declare(
+                qname,
+                lapin::options::QueueDeclareOptions::default(),
+                lapin::types::FieldTable::default(),
+            )
             .await?;
 
-            *resp.body_mut() = Body::from("OK");
-        }
-        _ => {
-            *resp.status_mut() = StatusCode::NOT_FOUND;
-        }
+        info!("created queue '{}'", queue.name());
     }
 
-    Ok(resp)
+    // Relay messages
+    while let Some(received) = rx.recv().await {
+        let opts = BasicPublishOptions::default();
+        let props = BasicProperties::default()
+            .with_content_type(received.mime_type.into())
+            .with_message_id(received.request_id.into());
+        let qname = &received.qname;
+
+        channel
+            .basic_publish("", qname, opts, &received.body, props)
+            .await?
+            .await?;
+
+        info!("delivered message to queue '{qname}'");
+    }
+
+    channel.close(0, "").await?;
+    Ok(())
 }
 
-async fn collect_body<T>(body: T, max_len: usize) -> anyhow::Result<Vec<u8>>
-where
-    T: HttpBody,
-{
-    let size_hint = body.size_hint().lower() as usize;
-    if size_hint > max_len {
-        return Err(anyhow!("body too large"));
-    }
+async fn http_server_task(
+    lua: Arc<Mutex<Lua>>,
+    server_addr: SocketAddr,
+    tx: Sender<Payload>,
+) -> Result<(), Error> {
+    let svc = svc::MakeSvc(lua.clone(), tx);
 
-    let mut current_size: usize = 0;
-    let mut v = Vec::with_capacity(size_hint);
+    hyper::Server::bind(&server_addr)
+        .executor(tokio_util::LocalExec)
+        .serve(svc)
+        .with_graceful_shutdown(ctrl_c())
+        .await?;
 
-    futures_util::pin_mut!(body);
-    while let Some(buf) = body.data().await {
-        let mut buf = match buf {
-            Ok(buf) => buf,
-            // TODO: use err
-            Err(_err) => return Err(anyhow!("failed to get buf")),
-        };
-
-        if buf.has_remaining() {
-            let rem = buf.remaining();
-            if current_size + rem > max_len {
-                return Err(anyhow!("body too large"));
-            }
-
-            let mut copy = buf.copy_to_bytes(rem).to_vec();
-            let len = copy.len();
-            current_size += len;
-            v.append(&mut copy);
-        }
-    }
-
-    Ok(v)
+    Ok(())
 }

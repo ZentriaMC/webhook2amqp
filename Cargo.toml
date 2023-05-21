@@ -7,12 +7,16 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-bytes = "1.2"
-futures = "0.3"
+bytes = "1.4"
 futures-util = "0.3"
 hyper = { version = "0.14", features = ["http1", "tcp", "server"] }
-lapin = "2.1.1"
+jsonc-parser = { version = "0.21.1", features = ["serde"] }
+lapin = "2.2.1"
 mime = "0.3"
+mlua = { version = "0.8.9", features = ["async", "luajit52", "macros", "send"] }
+serde = { version = "1.0.171", features = ["derive"] }
+serde_json = "1.0.100"
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync"] }
 tracing = "0.1.37"
-tracing-subscriber = "0.3.15"
+tracing-subscriber = "0.3"
+uuid = { version = "1.4", features = ["v4", "fast-rng"] }

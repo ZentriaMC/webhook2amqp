@@ -1,0 +1,7 @@
+{
+    // Testing key: https://newreleases.io/webhooks
+    "newreleases_secret_key": "49mdjrdzpefftf8q5jsz6xkzxr",
+    "newreleases_repos_prerelease": "near/nearcore,neovim/neovim,solana-labs/solana",
+    "emailengine_accounts": "invoices,spam",
+    "emailengine_secret": "foobarbaz",
+}
