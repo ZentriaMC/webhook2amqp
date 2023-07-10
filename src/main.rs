@@ -1,8 +1,10 @@
 #![allow(clippy::redundant_pattern_matching)]
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use clap::Parser;
 use lapin::BasicProperties;
 use lapin::{options::BasicPublishOptions, Connection};
 use mlua::Lua;
@@ -31,35 +33,68 @@ async fn ctrl_c() {
         .expect("failed to install sigint handler")
 }
 
+#[derive(Parser, Debug)]
+#[command(author, version, about)]
+struct Args {
+    /// AMQP server URI
+    #[arg(
+        short = 'u',
+        long,
+        env = "WEBHOOK2AMQP_AMQP_URI",
+        default_value = "amqp://127.0.0.1:5672/%2f"
+    )]
+    amqp_uri: String,
+
+    /// HTTP server listen address
+    #[arg(
+        short = 'l',
+        long,
+        env = "WEBHOOK2AMQP_HTTP_LISTEN_ADDR",
+        default_value = "127.0.0.1:3000"
+    )]
+    http_listen_addr: String,
+
+    /// Lua scripts directory
+    #[arg(
+        short = 's',
+        long,
+        env = "WEBHOOK2AMQP_LUA_SANDBOX",
+        default_value = "./lua"
+    )]
+    lua_sandbox: PathBuf,
+
+    /// Lua scripts configuration (JSONC)
+    #[arg(
+        short = 'c',
+        long,
+        env = "WEBHOOK2AMQP_LUA_CONFIG",
+        default_value = "./config.jsonc"
+    )]
+    lua_config: PathBuf,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
 
-    let amqp_addr = std::env::var("WEBHOOK2AMQP_AMQP_ADDR")
-        .unwrap_or_else(|_| "amqp://127.0.0.1:5672/%2f".into());
+    let args = Args::parse();
 
-    let server_addr: SocketAddr = std::env::var("WEBHOOK2AMQP_LISTEN_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:3000".into())
-        .parse()?;
-
-    let lua_sandbox = std::env::var("WEBHOOK2AMQP_LUA_SANDBOX").unwrap_or_else(|_| "./lua".into());
-
-    let config_file =
-        std::env::var("WEBHOOK2AMQP_LUA_KV_CONFIG").unwrap_or_else(|_| "./config.jsonc".into());
+    let server_addr = args.http_listen_addr.parse()?;
 
     // Load configuration
-    let lua_config = lua_config::load_config(config_file).await?;
+    let lua_config = lua_config::load_config(&args.lua_config).await?;
 
     // Initialize Lua runtime
     let lua = Arc::new(Mutex::new(Lua::new()));
     let create_queue_names = {
         let lua = lua.lock().await;
-        crate::lua::setup_engine(&lua, lua_sandbox, lua_config).await?
+        crate::lua::setup_engine(&lua, &args.lua_sandbox, lua_config).await?
     };
 
+    info!("connecting to amqp server");
     let amqp_conn = Arc::new(
         lapin::Connection::connect(
-            &amqp_addr,
+            &args.amqp_uri,
             lapin::ConnectionProperties::default().with_connection_name("webhook2amqp".into()),
         )
         .await?,

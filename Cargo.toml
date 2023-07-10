@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 bytes = "1.4"
+clap = { version = "4.3.11", features = ["derive", "env"] }
 futures-util = "0.3"
 hyper = { version = "0.14", features = ["http1", "tcp", "server"] }
 jsonc-parser = { version = "0.21.1", features = ["serde"] }
